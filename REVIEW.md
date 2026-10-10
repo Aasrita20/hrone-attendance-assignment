@@ -1,0 +1,20 @@
+# REVIEW.md
+
+List of defects found in the starter `app/main.py` and how they were resolved:
+
+| # | Where (function / line) | What is wrong | How you'd notice it (test, input, or symptom) | How you fixed it |
+|---|---|---|---|---|
+| 1 | `compute_late_minutes` | Mixed time zones by using `.replace(hour=h, minute=m)` directly on a naive/UTC datetime, and checked grace period improperly. | Punch-in at 09:40:01 IST returned 10 mins late under naive time or failed across day boundaries. | Converted UTC instant to IST timezone first, checked `elapsed_seconds > 600`, and calculated `floor(elapsed_seconds // 60)`. |
+| 2 | `compute_overtime` | Omitted overnight shift handling (where `shift_end <= shift_start`) and omitted the >= 30 minutes threshold requirement. | Overnight shift punch-out on next day resulted in negative or incorrect overtime; 25 mins overtime returned 25 instead of 0. | Added overnight shift check to push `shift_end` to the next calendar day, and enforced `elapsed_seconds >= 1800` threshold before returning `floor(elapsed_seconds // 60)`. |
+| 3 | `compute_work_hours` | Used Python's built-in `round()` which performs Banker's rounding (round half to even). | Work hours calculation of 4.545 rounded to 4.54 instead of 4.55. | Implemented custom `round_half_up` helper using `decimal.Decimal` with `ROUND_HALF_UP`. |
+| 4 | `create_employee` | Check-then-insert pattern caused race conditions; `created_at` set to naive `datetime.now()`; missing validation for `shift_start != shift_end`. | Concurrent POST `/employees` with identical `emp_code` created duplicates; response contained naive datetime. | Added database unique index on `emp_code`, caught `DuplicateKeyError` to return 409, validated `shift_start != shift_end` in Pydantic, and returned `created_at` as epoch ms int. |
+| 5 | `list_employees` | Pagination skip formula was `page * page_size` (skipping page 1), and `total` count ignored the `department` filter. | Requesting `page=1&page_size=20` returned items starting from index 20; `total` count showed total collection size instead of filtered count. | Fixed skip formula to `(page - 1) * page_size` and updated count query to `db.employees.count_documents(q)`. |
+| 6 | `punch_in` | Check-then-insert race condition; ignored R1 overnight shift rule for date determination; included `id` field in response; missing employee 404 check and epoch ms validation. | Concurrent duplicate punch-ins created two records; overnight shift punch-in before 06:00 AM got assigned to the current date instead of previous day; response leaked MongoDB internal ID. | Added compound unique index on `(emp_code, date)` to handle race conditions via `DuplicateKeyError`, implemented R1 `get_attendance_date` logic, stripped `_id`/`id`, added 404 check for missing employee, and added epoch ms validator. |
+| 7 | `list_attendance` | Loaded entire matching collection into Python memory using `list(db.attendance_logs.find(q))` and sorted in Python; missing date range order validation. | Poor performance and high memory footprint on 100k records; passing `date_from > date_to` did not fail with 422. | Replaced in-memory sorting/pagination with MongoDB `.sort([("date", -1), ("emp_code", 1)])`, `.skip()`, `.limit()`, and added validation raising 422 when `date_from > date_to`. |
+| 8 | `health` | Endpoints returned static 200 without probing MongoDB connection state. | App returned 200 health status even when MongoDB service was down. | Added `db.command("ping")` check inside `/health`, raising 503 if database ping fails. |
+
+---
+
+### Non-Defects Examined
+- **Pydantic Model Schema Structure**: The starter models (`EmployeeIn`, `PunchInIn`) were basic but valid; extending them with custom field validators for epoch ms and string patterns was required for complete validation rather than fixing a syntax error.
+- **FastAPI Lifespan Context Manager**: The starter used module-level script execution for client initialization. Moving index creation into FastAPI `lifespan` ensured idempotent DB index creation on startup without breaking client initialization.
